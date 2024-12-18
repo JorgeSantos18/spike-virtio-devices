@@ -2112,6 +2112,133 @@ VIRTIODevice *virtio_9p_init(VIRTIOBusDef *bus, FSDevice *fs,
     return (VIRTIODevice *)s;
 }
 
+/*********************************************************************/
+/* network device */
+
+typedef struct VIRTIONetDevice {
+    VIRTIODevice common;
+    EthernetDevice *es;
+    int header_size;
+} VIRTIONetDevice;
+
+typedef struct {
+    uint8_t flags;
+    uint8_t gso_type;
+    uint16_t hdr_len;
+    uint16_t gso_size;
+    uint16_t csum_start;
+    uint16_t csum_offset;
+    uint16_t num_buffers;
+} VIRTIONetHeader;
+
+static int virtio_net_recv_request(VIRTIODevice *s, int queue_idx,
+                                   int desc_idx, int read_size,
+                                   int write_size)
+{
+    VIRTIONetDevice *s1 = (VIRTIONetDevice *)s;
+    EthernetDevice *es = s1->es;
+    VIRTIONetHeader h;
+    uint8_t *buf;
+    int len;
+
+    if (queue_idx == 1) {
+        /* send to network */
+        if (memcpy_from_queue(s, &h, queue_idx, desc_idx, 0, s1->header_size) < 0)
+            return 0;
+        len = read_size - s1->header_size;
+        buf = (uint8_t*) malloc(len);
+        memcpy_from_queue(s, buf, queue_idx, desc_idx, s1->header_size, len);
+        es->write_packet(es, buf, len);
+        free(buf);
+        virtio_consume_desc(s, queue_idx, desc_idx, 0);
+    }
+    return 0;
+}
+
+static bool virtio_net_can_write_packet(EthernetDevice *es)
+{
+    VIRTIODevice *s = (VIRTIODevice *) es->device_opaque;
+    QueueState *qs = &s->queue[0];
+    uint16_t avail_idx;
+
+    if (!qs->ready)
+        return FALSE;
+    avail_idx = virtio_read16(s, qs->avail_addr + 2);
+    return qs->last_avail_idx != avail_idx;
+}
+
+static void virtio_net_write_packet(EthernetDevice *es, const uint8_t *buf, int buf_len)
+{
+    VIRTIODevice *s = (VIRTIODevice *) es->device_opaque;
+    VIRTIONetDevice *s1 = (VIRTIONetDevice *)s;
+    int queue_idx = 0;
+    QueueState *qs = &s->queue[queue_idx];
+    int desc_idx;
+    VIRTIONetHeader h;
+    int len, read_size, write_size;
+    uint16_t avail_idx;
+
+    if (!qs->ready)
+        return;
+    avail_idx = virtio_read16(s, qs->avail_addr + 2);
+    if (qs->last_avail_idx == avail_idx)
+        return;
+    desc_idx = virtio_read16(s, qs->avail_addr + 4 + 
+                             (qs->last_avail_idx & (qs->num - 1)) * 2);
+    if (get_desc_rw_size(s, &read_size, &write_size, queue_idx, desc_idx))
+        return;
+    len = s1->header_size + buf_len; 
+    if (len > write_size)
+        return;
+    memset(&h, 0, s1->header_size);
+    memcpy_to_queue(s, queue_idx, desc_idx, 0, &h, s1->header_size);
+    memcpy_to_queue(s, queue_idx, desc_idx, s1->header_size, buf, buf_len);
+    virtio_consume_desc(s, queue_idx, desc_idx, len);
+    qs->last_avail_idx++;
+}
+
+static void virtio_net_set_carrier(EthernetDevice *es, bool carrier_state)
+{
+#if 0
+    VIRTIODevice *s1 = es->device_opaque;
+    VIRTIONetDevice *s = (VIRTIONetDevice *)s1;
+    int cur_carrier_state;
+
+    //    printf("virtio_net_set_carrier: %d\n", carrier_state);
+    cur_carrier_state = s->common.config_space[6] & 1;
+    if (cur_carrier_state != carrier_state) {
+        s->common.config_space[6] = (carrier_state << 0);
+        virtio_config_change_notify(s1);
+    }
+#endif
+}
+
+VIRTIODevice *virtio_net_init(VIRTIOBusDef *bus, EthernetDevice *es, const simif_t* sim)
+{
+    VIRTIONetDevice *s;
+
+    s = (VIRTIONetDevice *) mallocz(sizeof(*s));
+    virtio_init(&s->common, bus,
+                1, 6 + 2, virtio_net_recv_request, sim);
+    /* VIRTIO_NET_F_MAC, VIRTIO_NET_F_STATUS */
+    s->common.device_features = (1 << 5) /* | (1 << 16) */;
+    s->common.queue[0].manual_recv = TRUE;
+    s->es = es;
+    memcpy(s->common.config_space, es->mac_addr, 6);
+    /* status */
+    s->common.config_space[6] = 0;
+    s->common.config_space[7] = 0;
+
+    s->header_size = sizeof(VIRTIONetHeader);
+    
+    es->device_opaque = s;
+    es->device_can_write_packet = virtio_net_can_write_packet;
+    es->device_write_packet = virtio_net_write_packet;
+    es->device_set_carrier = virtio_net_set_carrier;
+    return (VIRTIODevice *)s;
+}
+
+
 virtio_base_t::virtio_base_t(
       const simif_t* sim,
       abstract_interrupt_controller_t *intctrl,

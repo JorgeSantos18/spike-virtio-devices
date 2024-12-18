@@ -34,6 +34,7 @@
 #include <riscv/sim.h>
 #include <riscv/dts.h>
 #include <fdt/libfdt.h>
+#include "slirp/libslirp.h"
 
 #define VIRTIO_SIZE      0x1000
 
@@ -117,6 +118,30 @@ struct FSDevice;
 
 VIRTIODevice *virtio_9p_init(VIRTIOBusDef *bus, FSDevice *fs, const char *mount_tag, const simif_t* sim);
 
+typedef struct EthernetDevice EthernetDevice; 
+
+struct EthernetDevice {
+    uint8_t mac_addr[6]; /* mac address of the interface */
+    void (*write_packet)(EthernetDevice *net,
+                         const uint8_t *buf, int len);
+    void *opaque;
+#if !defined(EMSCRIPTEN)
+    void (*select_fill)(EthernetDevice *net, int *pfd_max,
+                        fd_set *rfds, fd_set *wfds, fd_set *efds,
+                        int *pdelay);
+    void (*select_poll)(EthernetDevice *net, 
+                        fd_set *rfds, fd_set *wfds, fd_set *efds,
+                        int select_ret);
+#endif
+    /* the following is set by the device */
+    void *device_opaque;
+    bool (*device_can_write_packet)(EthernetDevice *net);
+    void (*device_write_packet)(EthernetDevice *net,
+                                const uint8_t *buf, int len);
+    void (*device_set_carrier)(EthernetDevice *net, bool carrier_state);
+};
+
+VIRTIODevice *virtio_net_init(VIRTIOBusDef *bus, EthernetDevice *es, const simif_t* sim);
 
 class virtio_base_t : public abstract_device_t {
 public:
